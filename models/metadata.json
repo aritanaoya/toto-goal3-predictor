@@ -1,0 +1,34 @@
+{
+  "feature_names": [
+    "window_size",
+    "goals_mean",
+    "goals_std",
+    "xg_mean",
+    "xg_std",
+    "xg_trend",
+    "goals_trend",
+    "shots_mean",
+    "shots_on_target_mean",
+    "shot_conversion",
+    "xg_overperformance",
+    "possession_mean",
+    "passes_mean",
+    "pass_accuracy",
+    "conceded_mean",
+    "conceded_std",
+    "xg_against_mean",
+    "ppda_mean",
+    "interceptions_mean",
+    "home_goals_mean",
+    "away_goals_mean",
+    "fouls_mean",
+    "yellow_cards_mean",
+    "corners_mean",
+    "is_home"
+  ],
+  "weights": {
+    "poisson": 0.3,
+    "xgboost": 0.7
+  },
+  "saved_at": "2026-02-06T13:59:33.490487"
+}

@@ -1,0 +1,78 @@
+[project]
+name = "toto-predictor"
+version = "0.1.0"
+description = "Machine learning-based toto GOAL3 purchase strategy system"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "aritanaoya", email = "aritanaoya@gmail.com"}
+]
+
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "openpyxl>=3.1",
+    "scikit-learn>=1.4",
+    "xgboost>=2.0",
+    "scipy>=1.12",
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "typer>=0.9",
+    "rich>=13.0",
+    "joblib>=1.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.2",
+    "mypy>=1.8",
+    "pandas-stubs>=2.0",
+    "types-requests>=2.31",
+    "types-beautifulsoup4>=4.12",
+    "responses>=0.25",
+]
+
+[project.scripts]
+toto-predictor = "toto_predictor.cli.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/toto_predictor"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401", "F811"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --cov=src/toto_predictor --cov-report=term-missing"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["src/toto_predictor"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]
