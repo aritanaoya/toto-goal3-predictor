@@ -19,6 +19,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from xgboost import XGBClassifier
 
 from ..models.exceptions import ModelError, ModelNotTrainedError, PredictionError
+from ..models.matchup_features import MatchupFeatures
 from ..models.prediction import Prediction
 from ..models.team_features import TeamFeatures
 
@@ -83,12 +84,12 @@ class ModelEnsemble:
         self.poisson_model = PoissonRegressor(alpha=0.1, max_iter=1000)
         self.poisson_model.fit(features, targets)
 
-        # 2. XGBoost (得点を0-5にクリップして分類)
+        # 2. XGBoost (得点を0-3にクリップして4クラス分類)
         logger.info("XGBoostを学習中...")
-        targets_clipped = targets.clip(upper=5)
+        targets_clipped = targets.clip(upper=3)
         self.xgb_model = XGBClassifier(
             objective="multi:softprob",
-            num_class=6,
+            num_class=4,
             max_depth=6,
             learning_rate=0.05,
             n_estimators=500,
@@ -108,7 +109,7 @@ class ModelEnsemble:
         self.calibrator = CalibratedClassifierCV(
             estimator=XGBClassifier(
                 objective="multi:softprob",
-                num_class=6,
+                num_class=4,
                 max_depth=6,
                 learning_rate=0.05,
                 n_estimators=200,
@@ -134,11 +135,15 @@ class ModelEnsemble:
 
         return metrics
 
-    def predict(self, features: TeamFeatures | pd.DataFrame, round_number: int = 0) -> Prediction:
+    def predict(
+        self,
+        features: TeamFeatures | MatchupFeatures | pd.DataFrame,
+        round_number: int = 0,
+    ) -> Prediction:
         """得点分布を予測
 
         Args:
-            features: TeamFeaturesオブジェクトまたは特徴量DataFrame
+            features: TeamFeatures、MatchupFeatures、または特徴量DataFrame
             round_number: toto回号
 
         Returns:
@@ -155,7 +160,16 @@ class ModelEnsemble:
 
         try:
             # 特徴量の準備
-            if isinstance(features, TeamFeatures):
+            if isinstance(features, MatchupFeatures):
+                team_name = features.team
+                features_df = pd.DataFrame([features.to_dict()])
+                features_df = features_df.drop(
+                    columns=["team", "opponent", "calculated_at"], errors="ignore"
+                )
+                # is_homeをintに変換
+                if "is_home" in features_df.columns:
+                    features_df["is_home"] = features_df["is_home"].astype(int)
+            elif isinstance(features, TeamFeatures):
                 team_name = features.team
                 features_df = pd.DataFrame([features.to_dict()])
                 features_df = features_df.drop(columns=["team", "calculated_at"], errors="ignore")
@@ -286,7 +300,7 @@ class ModelEnsemble:
         """XGBoost出力をtotoカテゴリに変換
 
         Args:
-            probs: XGBoostの確率出力（6クラス: 0-5）
+            probs: XGBoostの確率出力（4クラス: 0, 1, 2, 3+）
 
         Returns:
             カテゴリと確率の辞書
@@ -295,7 +309,7 @@ class ModelEnsemble:
             "0": float(probs[0]),
             "1": float(probs[1]),
             "2": float(probs[2]),
-            "3+": float(probs[3:].sum()),
+            "3+": float(probs[3]) if len(probs) > 3 else float(1 - probs[:3].sum()),
         }
 
     def _ensemble_probs(
@@ -344,10 +358,10 @@ class ModelEnsemble:
             poisson.fit(feat_train, tgt_train)
 
             # XGBoostモデル
-            tgt_train_clipped = tgt_train.clip(upper=5)
+            tgt_train_clipped = tgt_train.clip(upper=3)
             xgb = XGBClassifier(
                 objective="multi:softprob",
-                num_class=6,
+                num_class=4,
                 max_depth=6,
                 learning_rate=0.05,
                 n_estimators=200,

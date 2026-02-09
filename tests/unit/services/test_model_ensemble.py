@@ -194,7 +194,7 @@ class TestModelEnsemblePredict:
         assert prediction.poisson_lambda is not None
         assert prediction.poisson_lambda > 0
         assert prediction.xgb_probs is not None
-        assert len(prediction.xgb_probs) == 6
+        assert len(prediction.xgb_probs) == 4
 
     def test_predict_without_calibrator(self, tmp_path):
         """キャリブレーターなしで予測"""
@@ -348,16 +348,16 @@ class TestModelEnsembleProbConversion:
         assert probs["3+"] > probs["0"]  # 3点以上の確率が高い
 
     def test_xgb_to_toto_probs(self, tmp_path):
-        """XGBoost確率変換"""
+        """XGBoost確率変換（4クラス）"""
         ensemble = ModelEnsemble(str(tmp_path))
-        xgb_probs = np.array([0.1, 0.2, 0.25, 0.15, 0.15, 0.15])
+        xgb_probs = np.array([0.1, 0.3, 0.35, 0.25])
 
         probs = ensemble._xgb_to_toto_probs(xgb_probs)
 
         assert probs["0"] == pytest.approx(0.1, abs=0.001)
-        assert probs["1"] == pytest.approx(0.2, abs=0.001)
-        assert probs["2"] == pytest.approx(0.25, abs=0.001)
-        assert probs["3+"] == pytest.approx(0.45, abs=0.001)  # 0.15 + 0.15 + 0.15
+        assert probs["1"] == pytest.approx(0.3, abs=0.001)
+        assert probs["2"] == pytest.approx(0.35, abs=0.001)
+        assert probs["3+"] == pytest.approx(0.25, abs=0.001)
 
     def test_ensemble_probs(self, tmp_path):
         """アンサンブル確率"""

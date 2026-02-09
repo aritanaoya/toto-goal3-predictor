@@ -49,6 +49,11 @@ def predict(
         "-m",
         help="モデルディレクトリ",
     ),
+    matches: str = typer.Option(
+        "",
+        "--matches",
+        help="対戦カード（例: 'チームA:チームB,チームC:チームD'）。指定時は対戦相手考慮の予測",
+    ),
     output: str = typer.Option(
         "",
         "--output",
@@ -71,41 +76,96 @@ def predict(
 
         feature_engine = FeatureEngine(db_path)
 
-        # 予測対象チームの決定
-        if teams:
-            team_list = [t.strip() for t in teams.split(",")]
-        else:
-            # DBから全チームを取得
-            from ...services.data_loader import DataLoader
+        # 対戦カードモードか判定
+        use_matchup = bool(matches)
 
-            loader = DataLoader(db_path)
-            team_list = loader.get_teams()
-
-        if not team_list:
-            console.print("[yellow]予測対象チームがありません[/yellow]")
-            raise typer.Exit(1)
-
-        console.print(f"対象チーム: {len(team_list)}チーム\n")
-
-        predictions = []
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task(description="予測中...", total=len(team_list))
-
-            for team in team_list:
-                progress.update(task, description=f"予測中: {team}")
-                try:
-                    features = feature_engine.calculate_features(
-                        team, datetime.now(), window_sizes=[5, 10, 20]
+        if use_matchup:
+            # 対戦カードから予測対象を構築
+            match_pairs = []
+            for pair in matches.split(","):
+                pair = pair.strip()
+                if ":" not in pair:
+                    console.print(
+                        f"[yellow]無効な対戦カード形式: {pair} ('チームA:チームB'の形式で指定)[/yellow]"
                     )
-                    pred = model.predict(features, round_number)
-                    predictions.append(pred)
-                except DataNotFoundError:
-                    console.print(f"[yellow]スキップ: {team} (データ不足)[/yellow]")
-                progress.advance(task)
+                    continue
+                home, away = pair.split(":", 1)
+                match_pairs.append((home.strip(), away.strip()))
+
+            if not match_pairs:
+                console.print("[yellow]有効な対戦カードがありません[/yellow]")
+                raise typer.Exit(1)
+
+            console.print(f"対戦カード: {len(match_pairs)}試合（対戦相手考慮モード）\n")
+
+            predictions = []
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task(description="予測中...", total=len(match_pairs) * 2)
+
+                for home, away in match_pairs:
+                    # ホームチーム予測
+                    progress.update(task, description=f"予測中: {home} (vs {away})")
+                    try:
+                        matchup = feature_engine.calculate_matchup_features(
+                            home, away, is_home=True, as_of_date=datetime.now()
+                        )
+                        pred = model.predict(matchup, round_number)
+                        predictions.append(pred)
+                    except DataNotFoundError:
+                        console.print(f"[yellow]スキップ: {home} (データ不足)[/yellow]")
+                    progress.advance(task)
+
+                    # アウェイチーム予測
+                    progress.update(task, description=f"予測中: {away} (vs {home})")
+                    try:
+                        matchup = feature_engine.calculate_matchup_features(
+                            away, home, is_home=False, as_of_date=datetime.now()
+                        )
+                        pred = model.predict(matchup, round_number)
+                        predictions.append(pred)
+                    except DataNotFoundError:
+                        console.print(f"[yellow]スキップ: {away} (データ不足)[/yellow]")
+                    progress.advance(task)
+        else:
+            # 従来モード：チーム単体の特徴量で予測
+            if teams:
+                team_list = [t.strip() for t in teams.split(",")]
+            else:
+                # DBから全チームを取得
+                from ...services.data_loader import DataLoader
+
+                loader = DataLoader(db_path)
+                team_list = loader.get_teams()
+
+            if not team_list:
+                console.print("[yellow]予測対象チームがありません[/yellow]")
+                raise typer.Exit(1)
+
+            console.print(f"対象チーム: {len(team_list)}チーム\n")
+
+            predictions = []
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task(description="予測中...", total=len(team_list))
+
+                for team in team_list:
+                    progress.update(task, description=f"予測中: {team}")
+                    try:
+                        features = feature_engine.calculate_features(
+                            team, datetime.now(), window_sizes=[5, 10, 20]
+                        )
+                        pred = model.predict(features, round_number)
+                        predictions.append(pred)
+                    except DataNotFoundError:
+                        console.print(f"[yellow]スキップ: {team} (データ不足)[/yellow]")
+                    progress.advance(task)
 
         # 結果表示
         console.print(f"\n[bold]第{round_number}回 GOAL3 予測結果[/bold]\n")

@@ -13,11 +13,13 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from ...models.exceptions import TotoPredictorError
+from ...models.match_schedule import MatchSchedule
 from ...services.data_loader import DataLoader
 from ...services.feature_engine import FeatureEngine
 from ...services.model_ensemble import ModelEnsemble
 from ...services.strategy_engine import StrategyEngine
 from ...services.vote_scraper import VoteScraper
+from .strategy_cmd import _display_marksheet
 
 app = typer.Typer()
 console = Console()
@@ -72,6 +74,11 @@ def pipeline(
         "-s",
         help="シーズン年",
     ),
+    matches: str = typer.Option(
+        "",
+        "--matches",
+        help="対戦カード（例: 'チームA:チームB,チームC:チームD'）。指定時は対戦相手考慮の予測",
+    ),
 ) -> None:
     """週次パイプライン全体を実行
 
@@ -97,7 +104,7 @@ def pipeline(
         ) as progress:
             # 1. データインポート
             if not skip_import:
-                task = progress.add_task(description="[1/5] データをインポート中...", total=None)
+                task = progress.add_task(description="[1/6] データをインポート中...", total=None)
                 loader = DataLoader(db_path)
                 try:
                     count = loader.load_directory(data_dir, season)
@@ -107,7 +114,7 @@ def pipeline(
                 progress.remove_task(task)
 
             # 2. モデル学習（または読み込み）
-            task = progress.add_task(description="[2/5] モデルを準備中...", total=None)
+            task = progress.add_task(description="[2/6] モデルを準備中...", total=None)
             model = ModelEnsemble(model_dir)
 
             if not skip_train:
@@ -122,19 +129,52 @@ def pipeline(
             progress.remove_task(task)
 
             # 3. 予測実行
-            task = progress.add_task(description="[3/5] 予測を実行中...", total=None)
+            task = progress.add_task(description="[3/6] 予測を実行中...", total=None)
             feature_engine = FeatureEngine(db_path)
-            loader = DataLoader(db_path)
-            teams = loader.get_teams()
+            scraper = VoteScraper()
 
-            predictions = []
-            for team in teams:
+            # スケジュール解決
+            schedule: MatchSchedule | None = None
+            if matches:
+                schedule = MatchSchedule.from_matches_str(matches, round_number)
+            else:
+                # --matches未指定時はtotoONEから自動取得を試行
                 try:
-                    features = feature_engine.calculate_features(team, datetime.now(), [5, 10, 20])
-                    pred = model.predict(features, round_number)
-                    predictions.append(pred)
+                    schedule = scraper.fetch_schedule(round_number)
+                    if schedule and schedule.matches:
+                        console.print(f"  ✓ 対戦カードを自動取得（{len(schedule.matches)}試合）")
                 except Exception:
                     pass
+
+            predictions = []
+            if schedule and schedule.matches:
+                # 対戦カードモード
+                for match_pair in schedule.matches:
+                    for team, opponent, is_home in [
+                        (match_pair.home_team, match_pair.away_team, True),
+                        (match_pair.away_team, match_pair.home_team, False),
+                    ]:
+                        try:
+                            matchup = feature_engine.calculate_matchup_features(
+                                team, opponent, is_home=is_home, as_of_date=datetime.now()
+                            )
+                            pred = model.predict(matchup, round_number)
+                            predictions.append(pred)
+                        except Exception:
+                            pass
+            else:
+                # 従来モード（対戦カードなし）
+                loader = DataLoader(db_path)
+                teams = loader.get_teams()
+                for team in teams:
+                    try:
+                        features = feature_engine.calculate_features(
+                            team, datetime.now(), [5, 10, 20]
+                        )
+                        pred = model.predict(features, round_number)
+                        predictions.append(pred)
+                    except Exception:
+                        pass
 
             # 予測結果を保存
             pred_path = Path(f"data/predictions/round_{round_number}.json")
@@ -146,14 +186,12 @@ def pipeline(
             progress.remove_task(task)
 
             # 4. 投票率取得
-            task = progress.add_task(description="[4/5] 投票率を取得中...", total=None)
+            task = progress.add_task(description="[4/6] 投票率を取得中...", total=None)
 
             if not skip_scrape:
-                scraper = VoteScraper()
                 vote_rates = scraper.fetch(round_number)
             else:
                 # キャッシュまたはモックを使用
-                scraper = VoteScraper()
                 cached = scraper.get_cached(round_number)
                 if cached:
                     vote_rates = cached
@@ -171,8 +209,8 @@ def pipeline(
             console.print(f"  ✓ {len(vote_rates)}チームの投票率取得")
             progress.remove_task(task)
 
-            # 5. 戦略計算・レポート生成
-            task = progress.add_task(description="[5/5] 戦略を計算中...", total=None)
+            # 5. 従来戦略計算
+            task = progress.add_task(description="[5/6] バリュースコアを計算中...", total=None)
             engine = StrategyEngine()
             recommendations = engine.calculate_value_scores(predictions, vote_rates)
             report_path = engine.generate_report(recommendations)
@@ -180,17 +218,44 @@ def pipeline(
             console.print(f"  ✓ {len(recommendations)}件の推奨を生成")
             progress.remove_task(task)
 
+            # 6. チケット戦略・拡張レポート生成
+            task = progress.add_task(description="[6/6] チケット戦略を生成中...", total=None)
+            ev_recs = engine.calculate_ev_scores(predictions, vote_rates)
+            ticket_recs = engine.generate_tickets(predictions, vote_rates, schedule=schedule)
+            enhanced_report_path = engine.generate_enhanced_report(ev_recs, ticket_recs)
+
+            # マークシートレポート生成
+            marksheet_path = ""
+            if schedule and ticket_recs:
+                marksheet_path = engine.generate_marksheet_report(
+                    ticket_recs, round_number=round_number
+                )
+
+            console.print(f"  ✓ {len(ticket_recs)}枚のチケット推奨を生成")
+            progress.remove_task(task)
+
+        # マークシート風表示（scheduleがある場合）
+        if schedule and ticket_recs:
+            _display_marksheet(ticket_recs, round_number)
+
         # 結果サマリー
         buy_count = sum(1 for r in recommendations if r.value_score >= 1.3)
         consider_count = sum(1 for r in recommendations if 1.0 <= r.value_score < 1.3)
+
+        report_info = f"レポート: {report_path}"
+        if enhanced_report_path:
+            report_info += f"\n拡張レポート: {enhanced_report_path}"
+        if marksheet_path:
+            report_info += f"\nマークシート: {marksheet_path}"
 
         console.print(
             Panel(
                 f"[green]パイプライン完了[/green]\n\n"
                 f"予測チーム数: {len(predictions)}\n"
                 f"推奨購入: {buy_count}件\n"
-                f"検討候補: {consider_count}件\n\n"
-                f"レポート: {report_path}",
+                f"検討候補: {consider_count}件\n"
+                f"チケット推奨: {len(ticket_recs)}枚\n\n"
+                f"{report_info}",
                 title="結果サマリー",
                 border_style="green",
             )

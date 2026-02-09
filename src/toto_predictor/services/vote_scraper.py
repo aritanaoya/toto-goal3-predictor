@@ -1,6 +1,7 @@
 """投票率スクレイパー
 
-このモジュールは、totoONEから投票率データをスクレイピングします。
+このモジュールは、totoONEから投票率データをPlaywrightでスクレイピングします。
+totoONEはSPA構造のため、JavaScriptレンダリング後のHTMLを取得する必要があります。
 """
 
 import json
@@ -9,25 +10,28 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import requests
 from bs4 import BeautifulSoup, Tag
+from playwright.sync_api import sync_playwright
 
 from ..models.exceptions import NetworkError, ParseError
+from ..models.match_schedule import MatchPair, MatchSchedule
 from ..models.vote_rate import VoteRate
 
 logger = logging.getLogger(__name__)
 
 
 class VoteScraper:
-    """totoONE投票率スクレイパー
+    """totoONE投票率スクレイパー（Playwright対応）
 
     totoONEから GOAL3 の投票率データを取得します。
+    SPA構造に対応するため、Playwrightでブラウザレンダリング後のHTMLを解析します。
 
     Attributes:
         base_url: totoONEのベースURL
         cache_dir: キャッシュ保存ディレクトリ
         max_retries: 最大リトライ回数
-        timeout: リクエストタイムアウト（秒）
+        timeout: リクエストタイムアウト（ミリ秒）
+        headless: ヘッドレスモードで実行するかどうか
     """
 
     BASE_URL = "https://www.totoone.jp/prediction"
@@ -38,6 +42,7 @@ class VoteScraper:
         cache_dir: str = "data/votes",
         max_retries: int = 3,
         timeout: int = 30,
+        headless: bool = True,
     ) -> None:
         """スクレイパーを初期化
 
@@ -45,11 +50,13 @@ class VoteScraper:
             cache_dir: キャッシュ保存ディレクトリ
             max_retries: 最大リトライ回数
             timeout: リクエストタイムアウト（秒）
+            headless: ヘッドレスモードで実行するかどうか
         """
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_retries = max_retries
         self.timeout = timeout
+        self.headless = headless
 
     def fetch(self, round_number: int | None = None) -> list[VoteRate]:
         """投票率を取得
@@ -69,9 +76,9 @@ class VoteScraper:
         else:
             url = self.BASE_URL
 
-        logger.info(f"投票率を取得中: {url}")
+        logger.info(f"投票率を取得中（Playwright）: {url}")
 
-        # リトライ付きでHTTP取得
+        # Playwrightでレンダリング済みHTMLを取得
         html = self._retry_fetch(url)
 
         # HTML解析
@@ -106,60 +113,165 @@ class VoteScraper:
             logger.warning(f"キャッシュの読み込みに失敗: {e}")
             return None
 
+    def fetch_schedule(self, round_number: int) -> MatchSchedule | None:
+        """totoONEから対戦カードスケジュールを取得
+
+        Args:
+            round_number: toto回号
+
+        Returns:
+            MatchScheduleオブジェクト。取得失敗時はNone。
+        """
+        # キャッシュ確認
+        schedule_dir = self.cache_dir.parent / "schedules"
+        schedule_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = schedule_dir / f"round_{round_number}.json"
+
+        if cache_path.exists():
+            try:
+                schedule = MatchSchedule.from_json(str(cache_path))
+                logger.info(f"キャッシュから対戦カードを取得: {cache_path}")
+                return schedule
+            except Exception as e:
+                logger.warning(f"スケジュールキャッシュの読み込みに失敗: {e}")
+
+        # totoONEからスクレイピング
+        try:
+            url = f"{self.BASE_URL}/{round_number}"
+            logger.info(f"対戦カードを取得中: {url}")
+            html = self._retry_fetch(url)
+            parsed = self._parse_schedule_html(html, round_number)
+
+            if parsed and parsed.matches:
+                parsed.to_json(str(cache_path))
+                logger.info(f"{len(parsed.matches)}試合の対戦カードを取得しました")
+                return parsed
+
+        except Exception as e:
+            logger.warning(f"対戦カードの取得に失敗: {e}")
+
+        return None
+
+    def _parse_schedule_html(self, html: str, round_number: int) -> MatchSchedule | None:
+        """HTMLから対戦カード情報を抽出
+
+        Args:
+            html: HTMLコンテンツ
+            round_number: toto回号
+
+        Returns:
+            MatchScheduleオブジェクト。解析失敗時はNone。
+        """
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            matches: list[MatchPair] = []
+
+            # GOAL3セクションを探す
+            goal3_section = soup.find("div", class_="goal3-prediction")
+            if goal3_section is None:
+                goal3_section = soup.find("section", id="goal3")
+            if goal3_section is None:
+                goal3_section = soup.find("div", class_="prediction-table")
+
+            if goal3_section is None or not isinstance(goal3_section, Tag):
+                logger.warning("GOAL3セクションが見つかりません")
+                return None
+
+            # 対戦カード行を探す
+            match_rows = goal3_section.find_all("div", class_="match-pair")
+            if not match_rows:
+                # team-row から対戦カードを推定（2チームずつペアリング）
+                team_rows = goal3_section.find_all("tr", class_="team-row")
+                team_names = []
+                for row in team_rows:
+                    name_td = row.find("td", class_="team-name")
+                    if name_td:
+                        team_names.append(name_td.get_text(strip=True))
+
+                for i in range(0, len(team_names) - 1, 2):
+                    matches.append(
+                        MatchPair(
+                            match_index=i // 2 + 1,
+                            home_team=team_names[i],
+                            away_team=team_names[i + 1],
+                        )
+                    )
+            else:
+                for i, row in enumerate(match_rows, start=1):
+                    teams = row.find_all("span", class_="team-name")
+                    if len(teams) >= 2:
+                        matches.append(
+                            MatchPair(
+                                match_index=i,
+                                home_team=teams[0].get_text(strip=True),
+                                away_team=teams[1].get_text(strip=True),
+                            )
+                        )
+
+            if matches:
+                return MatchSchedule(round_number=round_number, matches=matches)
+
+        except Exception as e:
+            logger.warning(f"対戦カードHTMLの解析に失敗: {e}")
+
+        return None
+
     def _retry_fetch(self, url: str) -> str:
-        """リトライ付きでHTTPリクエストを実行
+        """リトライ付きでPlaywrightによるHTMLレンダリングを実行
 
         Args:
             url: 取得するURL
 
         Returns:
-            HTMLコンテンツ
+            レンダリング済みHTMLコンテンツ
 
         Raises:
             NetworkError: ネットワークエラーが発生した場合
         """
-        headers = {"User-Agent": self.USER_AGENT}
         last_error: Exception | None = None
 
         for attempt in range(self.max_retries):
             try:
-                response = requests.get(url, headers=headers, timeout=self.timeout)
-                response.raise_for_status()
-                return str(response.text)
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=self.headless)
+                    context = browser.new_context(
+                        user_agent=self.USER_AGENT,
+                    )
+                    page = context.new_page()
 
-            except requests.Timeout as e:
+                    # ページにアクセス
+                    page.goto(url, timeout=self.timeout * 1000)
+
+                    # JavaScriptレンダリング完了を待機
+                    # GOAL3のセクションが表示されるまで待つ
+                    try:
+                        page.wait_for_selector(
+                            ".goal3-prediction, #goal3, .vote-rate, .prediction-table",
+                            timeout=self.timeout * 1000,
+                        )
+                    except Exception:
+                        # セレクタが見つからない場合でもHTMLを取得して解析を試みる
+                        logger.warning(
+                            "投票率セクションの待機がタイムアウト、HTMLを取得して解析を試みます"
+                        )
+
+                    # レンダリング済みHTMLを取得
+                    html = page.content()
+
+                    browser.close()
+                    return html
+
+            except Exception as e:
                 last_error = e
                 wait_time = 2**attempt
                 logger.warning(
-                    f"タイムアウト (試行 {attempt + 1}/{self.max_retries}), "
-                    f"{wait_time}秒後にリトライ"
-                )
-                time.sleep(wait_time)
-
-            except requests.HTTPError as e:
-                # 4xxエラーはリトライしない
-                if e.response is not None and 400 <= e.response.status_code < 500:
-                    raise NetworkError(
-                        f"HTTPエラー: {e.response.status_code}",
-                        details={"url": url, "status_code": e.response.status_code},
-                    ) from e
-                last_error = e
-                wait_time = 2**attempt
-                logger.warning(
-                    f"HTTPエラー (試行 {attempt + 1}/{self.max_retries}), {wait_time}秒後にリトライ"
-                )
-                time.sleep(wait_time)
-
-            except requests.RequestException as e:
-                last_error = e
-                wait_time = 2**attempt
-                logger.warning(
-                    f"接続エラー (試行 {attempt + 1}/{self.max_retries}), {wait_time}秒後にリトライ"
+                    f"Playwright取得エラー (試行 {attempt + 1}/{self.max_retries}), "
+                    f"{wait_time}秒後にリトライ: {e}"
                 )
                 time.sleep(wait_time)
 
         raise NetworkError(
-            f"totoONEへの接続に失敗しました（{self.max_retries}回リトライ）",
+            f"totoONEへの接続に失敗しました（Playwright、{self.max_retries}回リトライ）",
             details={"url": url, "last_error": str(last_error)},
         )
 
@@ -180,15 +292,14 @@ class VoteScraper:
             soup = BeautifulSoup(html, "html.parser")
 
             # GOAL3のセクションを探す
-            # 実際のサイト構造に応じて調整が必要
-            vote_rates = []
+            vote_rates: list[VoteRate] = []
 
-            # 投票率テーブルを探す（サイト構造に応じて調整）
-            # 以下はプレースホルダー実装
+            # 投票率テーブルを探す（複数のセレクタを試行）
             goal3_section = soup.find("div", class_="goal3-prediction")
             if goal3_section is None:
-                # 代替セレクタを試行
                 goal3_section = soup.find("section", id="goal3")
+            if goal3_section is None:
+                goal3_section = soup.find("div", class_="prediction-table")
 
             if goal3_section is None or not isinstance(goal3_section, Tag):
                 raise ParseError(

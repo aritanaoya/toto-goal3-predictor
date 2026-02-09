@@ -35,6 +35,11 @@ def scrape(
         "--cache-dir",
         help="キャッシュディレクトリ",
     ),
+    headless: bool = typer.Option(
+        True,
+        "--headless/--no-headless",
+        help="ヘッドレスモードで実行するかどうか",
+    ),
 ) -> None:
     """totoONEから投票率を取得
 
@@ -47,7 +52,7 @@ def scrape(
         console.print("回号: 最新")
 
     try:
-        scraper = VoteScraper(cache_dir=cache_dir)
+        scraper = VoteScraper(cache_dir=cache_dir, headless=headless)
 
         # キャッシュチェック
         if use_cache and round_number > 0:

@@ -12,6 +12,7 @@ from ..db.database import Database
 from ..db.repositories.match_repository import MatchRepository
 from ..db.repositories.team_stats_repository import TeamStatsRepository
 from ..models.exceptions import DataNotFoundError
+from ..models.matchup_features import MatchupFeatures
 from ..models.team_features import TeamFeatures
 
 logger = logging.getLogger(__name__)
@@ -245,10 +246,46 @@ class FeatureEngine:
             "attack_vs_defense": team_features.xg_mean - opponent_features.xg_against_mean,
         }
 
+    def calculate_matchup_features(
+        self,
+        team: str,
+        opponent: str,
+        is_home: bool,
+        as_of_date: datetime | None = None,
+    ) -> MatchupFeatures:
+        """対戦カード特徴量を計算
+
+        チームと対戦相手の両方の特徴量から、交互作用特徴量を含む
+        MatchupFeaturesオブジェクトを生成します。
+
+        Args:
+            team: 対象チーム名
+            opponent: 対戦相手チーム名
+            is_home: 対象チームがホームかどうか
+            as_of_date: 特徴量計算の基準日時
+
+        Returns:
+            MatchupFeaturesオブジェクト
+
+        Raises:
+            DataNotFoundError: いずれかのチームのデータが不足している場合
+        """
+        team_features = self.calculate_features(team, as_of_date)
+        opponent_features = self.calculate_features(opponent, as_of_date)
+
+        matchup = MatchupFeatures.from_team_features(team_features, opponent_features, is_home)
+
+        logger.debug(
+            f"対戦カード特徴量を計算: {team} vs {opponent} "
+            f"(attack_vs_defense={matchup.attack_vs_defense:.3f})"
+        )
+        return matchup
+
     def prepare_training_data(
         self,
         seasons: list[int],
         min_matches_before: int = 10,
+        use_matchup: bool = True,
     ) -> tuple[pd.DataFrame, pd.Series]:
         """モデル学習用のデータを準備
 
@@ -257,6 +294,7 @@ class FeatureEngine:
         Args:
             seasons: 対象シーズンのリスト
             min_matches_before: 特徴量計算に必要な最小試合数
+            use_matchup: 対戦カード特徴量を使用するかどうか（デフォルト: True）
 
         Returns:
             (特徴量DataFrame, 目的変数Series)のタプル
@@ -276,21 +314,26 @@ class FeatureEngine:
                     continue
 
                 # 各チームについて特徴量と目標を計算
-                for team, is_home in [
-                    (match.home_team, True),
-                    (match.away_team, False),
+                for team, opponent, is_home in [
+                    (match.home_team, match.away_team, True),
+                    (match.away_team, match.home_team, False),
                 ]:
                     try:
-                        # 試合前の特徴量を計算
-                        features = self.calculate_features(
-                            team,
-                            as_of_date=match.date,
-                            window_sizes=[5, 10, 20],
-                        )
-
-                        # 特徴量ベクトルを取得
-                        feature_dict = features.to_dict()
-                        feature_dict["is_home"] = int(is_home)
+                        if use_matchup:
+                            # 対戦カード特徴量を使用
+                            matchup = self.calculate_matchup_features(
+                                team, opponent, is_home, as_of_date=match.date
+                            )
+                            feature_dict = matchup.to_dict()
+                        else:
+                            # 従来のチーム単体特徴量を使用
+                            features = self.calculate_features(
+                                team,
+                                as_of_date=match.date,
+                                window_sizes=[5, 10, 20],
+                            )
+                            feature_dict = features.to_dict()
+                            feature_dict["is_home"] = int(is_home)
 
                         # 実際の得点（目標変数）
                         goals = match.home_goals if is_home else match.away_goals
@@ -313,13 +356,18 @@ class FeatureEngine:
         targets = pd.Series(all_targets, name="goals")
 
         # 不要なカラムを削除
-        drop_columns = ["team", "calculated_at"]
+        drop_columns = ["team", "opponent", "calculated_at"]
         features_df = features_df.drop(
             columns=[c for c in drop_columns if c in features_df.columns]
         )
 
+        # bool型のis_homeをintに変換
+        if "is_home" in features_df.columns:
+            features_df["is_home"] = features_df["is_home"].astype(int)
+
         logger.info(
-            f"学習データを準備しました: {len(features_df)}サンプル, {len(features_df.columns)}特徴量"
+            f"学習データを準備しました: {len(features_df)}サンプル, "
+            f"{len(features_df.columns)}特徴量 (matchup={use_matchup})"
         )
         return features_df, targets
 

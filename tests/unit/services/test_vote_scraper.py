@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-import requests
 
 from toto_predictor.models.exceptions import NetworkError, ParseError
 from toto_predictor.models.vote_rate import VoteRate
@@ -27,6 +26,12 @@ class TestVoteScraperInit:
         scraper = VoteScraper(cache_dir=str(tmp_path))
         assert scraper.max_retries == 3
         assert scraper.timeout == 30
+        assert scraper.headless is True
+
+    def test_init_headless_option(self, tmp_path):
+        """ヘッドレスモードの設定"""
+        scraper = VoteScraper(cache_dir=str(tmp_path), headless=False)
+        assert scraper.headless is False
 
 
 class TestVoteScraperFetch:
@@ -103,44 +108,82 @@ class TestVoteScraperFetch:
         mock_save.assert_called_once()
 
 
-class TestVoteScraperRetryFetch:
-    """_retry_fetch()テスト"""
+def _create_mock_playwright():
+    """Playwright のモックを生成するヘルパー"""
+    mock_page = MagicMock()
+    mock_page.content.return_value = "<html>test</html>"
 
-    @patch("toto_predictor.services.vote_scraper.requests.get")
-    def test_retry_fetch_success(self, mock_get, tmp_path):
+    mock_context = MagicMock()
+    mock_context.new_page.return_value = mock_page
+
+    mock_browser = MagicMock()
+    mock_browser.new_context.return_value = mock_context
+
+    mock_chromium = MagicMock()
+    mock_chromium.launch.return_value = mock_browser
+
+    mock_pw = MagicMock()
+    mock_pw.chromium = mock_chromium
+
+    return mock_pw, mock_browser, mock_page
+
+
+class TestVoteScraperRetryFetch:
+    """_retry_fetch()テスト（Playwright版）"""
+
+    @patch("toto_predictor.services.vote_scraper.sync_playwright")
+    def test_retry_fetch_success(self, mock_sync_pw, tmp_path):
         """正常取得"""
-        mock_response = MagicMock()
-        mock_response.text = "<html>test</html>"
-        mock_response.raise_for_status.return_value = None
-        mock_get.return_value = mock_response
+        mock_pw, mock_browser, mock_page = _create_mock_playwright()
+        mock_sync_pw.return_value.__enter__ = MagicMock(return_value=mock_pw)
+        mock_sync_pw.return_value.__exit__ = MagicMock(return_value=False)
 
         scraper = VoteScraper(cache_dir=str(tmp_path))
         result = scraper._retry_fetch("https://example.com")
 
         assert result == "<html>test</html>"
+        mock_page.goto.assert_called_once()
+        mock_browser.close.assert_called_once()
 
-    @patch("toto_predictor.services.vote_scraper.requests.get")
+    @patch("toto_predictor.services.vote_scraper.sync_playwright")
     @patch("toto_predictor.services.vote_scraper.time.sleep")
-    def test_retry_fetch_timeout_retry(self, mock_sleep, mock_get, tmp_path):
-        """タイムアウト時にリトライ"""
-        mock_get.side_effect = [
-            requests.Timeout("Timeout"),
-            requests.Timeout("Timeout"),
-            MagicMock(text="<html></html>", raise_for_status=MagicMock()),
-        ]
+    def test_retry_fetch_error_then_success(self, mock_sleep, mock_sync_pw, tmp_path):
+        """エラー後にリトライして成功"""
+        mock_pw_fail = MagicMock()
+        mock_pw_fail.chromium.launch.side_effect = Exception("Browser launch failed")
+
+        mock_pw_ok, mock_browser, mock_page = _create_mock_playwright()
+
+        call_count = [0]
+
+        def side_effect_enter(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 1:
+                return mock_pw_fail
+            return mock_pw_ok
+
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(side_effect=side_effect_enter)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+        mock_sync_pw.return_value = mock_cm
 
         scraper = VoteScraper(cache_dir=str(tmp_path), max_retries=3)
         result = scraper._retry_fetch("https://example.com")
 
-        assert result == "<html></html>"
-        assert mock_get.call_count == 3
-        assert mock_sleep.call_count == 2
+        assert result == "<html>test</html>"
+        assert mock_sleep.call_count == 1
 
-    @patch("toto_predictor.services.vote_scraper.requests.get")
+    @patch("toto_predictor.services.vote_scraper.sync_playwright")
     @patch("toto_predictor.services.vote_scraper.time.sleep")
-    def test_retry_fetch_max_retries_exceeded(self, mock_sleep, mock_get, tmp_path):
+    def test_retry_fetch_max_retries_exceeded(self, mock_sleep, mock_sync_pw, tmp_path):
         """最大リトライ超過"""
-        mock_get.side_effect = requests.Timeout("Timeout")
+        mock_pw = MagicMock()
+        mock_pw.chromium.launch.side_effect = Exception("Browser launch failed")
+
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_pw)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+        mock_sync_pw.return_value = mock_cm
 
         scraper = VoteScraper(cache_dir=str(tmp_path), max_retries=3)
 
@@ -148,64 +191,50 @@ class TestVoteScraperRetryFetch:
             scraper._retry_fetch("https://example.com")
 
         assert "totoONEへの接続に失敗しました" in str(exc_info.value)
-        assert mock_get.call_count == 3
 
-    @patch("toto_predictor.services.vote_scraper.requests.get")
-    def test_retry_fetch_http_4xx_no_retry(self, mock_get, tmp_path):
-        """4xxエラーはリトライしない"""
-        mock_response = MagicMock()
-        mock_response.status_code = 404
-        mock_error = requests.HTTPError()
-        mock_error.response = mock_response
-        mock_get.side_effect = mock_error
+    @patch("toto_predictor.services.vote_scraper.sync_playwright")
+    def test_retry_fetch_passes_headless_option(self, mock_sync_pw, tmp_path):
+        """headlessオプションがPlaywrightに渡される"""
+        mock_pw, mock_browser, mock_page = _create_mock_playwright()
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_pw)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+        mock_sync_pw.return_value = mock_cm
 
-        scraper = VoteScraper(cache_dir=str(tmp_path), max_retries=3)
+        scraper = VoteScraper(cache_dir=str(tmp_path), headless=False)
+        scraper._retry_fetch("https://example.com")
 
-        with pytest.raises(NetworkError) as exc_info:
-            scraper._retry_fetch("https://example.com")
+        mock_pw.chromium.launch.assert_called_with(headless=False)
 
-        assert "HTTPエラー: 404" in str(exc_info.value)
-        assert mock_get.call_count == 1  # リトライしない
+    @patch("toto_predictor.services.vote_scraper.sync_playwright")
+    def test_retry_fetch_waits_for_selector(self, mock_sync_pw, tmp_path):
+        """セレクタ待機が実行される"""
+        mock_pw, mock_browser, mock_page = _create_mock_playwright()
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_pw)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+        mock_sync_pw.return_value = mock_cm
 
-    @patch("toto_predictor.services.vote_scraper.requests.get")
-    @patch("toto_predictor.services.vote_scraper.time.sleep")
-    def test_retry_fetch_http_5xx_retry(self, mock_sleep, mock_get, tmp_path):
-        """5xxエラーはリトライ"""
-        mock_response = MagicMock()
-        mock_response.status_code = 500
-        mock_error = requests.HTTPError()
-        mock_error.response = mock_response
+        scraper = VoteScraper(cache_dir=str(tmp_path))
+        scraper._retry_fetch("https://example.com")
 
-        success_response = MagicMock()
-        success_response.text = "<html></html>"
-        success_response.raise_for_status.return_value = None
+        mock_page.wait_for_selector.assert_called_once()
 
-        mock_get.side_effect = [mock_error, success_response]
+    @patch("toto_predictor.services.vote_scraper.sync_playwright")
+    def test_retry_fetch_selector_timeout_still_returns_html(self, mock_sync_pw, tmp_path):
+        """セレクタ待機タイムアウトでもHTMLを返す"""
+        mock_pw, mock_browser, mock_page = _create_mock_playwright()
+        mock_page.wait_for_selector.side_effect = Exception("Timeout")
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_pw)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+        mock_sync_pw.return_value = mock_cm
 
-        scraper = VoteScraper(cache_dir=str(tmp_path), max_retries=3)
+        scraper = VoteScraper(cache_dir=str(tmp_path))
         result = scraper._retry_fetch("https://example.com")
 
-        assert result == "<html></html>"
-        assert mock_get.call_count == 2
-
-    @patch("toto_predictor.services.vote_scraper.requests.get")
-    @patch("toto_predictor.services.vote_scraper.time.sleep")
-    def test_retry_fetch_connection_error_retry(self, mock_sleep, mock_get, tmp_path):
-        """接続エラーでリトライ"""
-        success_response = MagicMock()
-        success_response.text = "<html></html>"
-        success_response.raise_for_status.return_value = None
-
-        mock_get.side_effect = [
-            requests.ConnectionError("Connection failed"),
-            success_response,
-        ]
-
-        scraper = VoteScraper(cache_dir=str(tmp_path), max_retries=3)
-        result = scraper._retry_fetch("https://example.com")
-
-        assert result == "<html></html>"
-        assert mock_get.call_count == 2
+        # セレクタタイムアウトでもHTMLは取得できる
+        assert result == "<html>test</html>"
 
 
 class TestVoteScraperCache:
@@ -487,3 +516,140 @@ class TestVoteScraperMockData:
 
         assert all(vr.round_number == 1600 for vr in result_1600)
         assert all(vr.round_number == 1607 for vr in result_1607)
+
+
+class TestVoteScraperFetchSchedule:
+    """fetch_schedule()テスト"""
+
+    def test_fetch_schedule_from_cache(self, tmp_path):
+        """キャッシュからスケジュール取得"""
+        schedule_dir = tmp_path / "schedules"
+        schedule_dir.mkdir()
+        cache_data = {
+            "round_number": 1608,
+            "matches": [
+                {"match_index": 1, "home_team": "Team A", "away_team": "Team B"},
+                {"match_index": 2, "home_team": "Team C", "away_team": "Team D"},
+            ],
+        }
+        with open(schedule_dir / "round_1608.json", "w") as f:
+            json.dump(cache_data, f)
+
+        # cache_dirをvotes/に設定し、親ディレクトリ/schedulesにキャッシュがある構造
+        votes_dir = tmp_path / "votes"
+        votes_dir.mkdir()
+        # schedulesディレクトリはcache_dir.parent / "schedules" = tmp_path / "schedules"
+        scraper = VoteScraper(cache_dir=str(votes_dir))
+        result = scraper.fetch_schedule(1608)
+
+        assert result is not None
+        assert result.round_number == 1608
+        assert len(result.matches) == 2
+
+    @patch.object(VoteScraper, "_retry_fetch")
+    def test_fetch_schedule_from_html(self, mock_fetch, tmp_path):
+        """HTMLから対戦カードスクレイピング"""
+        html = """
+        <html><body>
+            <div class="goal3-prediction">
+                <table>
+                    <tr class="team-row">
+                        <td class="team-name">Kashima Antlers</td>
+                        <td class="vote-rate">25%</td>
+                        <td class="vote-rate">30%</td>
+                        <td class="vote-rate">25%</td>
+                        <td class="vote-rate">20%</td>
+                    </tr>
+                    <tr class="team-row">
+                        <td class="team-name">Kawasaki Frontale</td>
+                        <td class="vote-rate">20%</td>
+                        <td class="vote-rate">35%</td>
+                        <td class="vote-rate">25%</td>
+                        <td class="vote-rate">20%</td>
+                    </tr>
+                    <tr class="team-row">
+                        <td class="team-name">Machida Zelvia</td>
+                        <td class="vote-rate">22%</td>
+                        <td class="vote-rate">33%</td>
+                        <td class="vote-rate">25%</td>
+                        <td class="vote-rate">20%</td>
+                    </tr>
+                    <tr class="team-row">
+                        <td class="team-name">Tokyo</td>
+                        <td class="vote-rate">24%</td>
+                        <td class="vote-rate">31%</td>
+                        <td class="vote-rate">25%</td>
+                        <td class="vote-rate">20%</td>
+                    </tr>
+                </table>
+            </div>
+        </body></html>
+        """
+        mock_fetch.return_value = html
+
+        scraper = VoteScraper(cache_dir=str(tmp_path))
+        result = scraper.fetch_schedule(1608)
+
+        assert result is not None
+        assert len(result.matches) == 2
+        assert result.matches[0].home_team == "Kashima Antlers"
+        assert result.matches[0].away_team == "Kawasaki Frontale"
+        assert result.matches[1].home_team == "Machida Zelvia"
+        assert result.matches[1].away_team == "Tokyo"
+
+    @patch.object(VoteScraper, "_retry_fetch")
+    def test_fetch_schedule_returns_none_on_failure(self, mock_fetch, tmp_path):
+        """取得失敗時にNoneが返ること"""
+        mock_fetch.side_effect = Exception("Network error")
+
+        cache_dir = tmp_path / "votes_fail"
+        cache_dir.mkdir()
+        scraper = VoteScraper(cache_dir=str(cache_dir))
+        result = scraper.fetch_schedule(1609)
+
+        assert result is None
+
+    @patch.object(VoteScraper, "_retry_fetch")
+    def test_fetch_schedule_no_goal3_section(self, mock_fetch, tmp_path):
+        """GOAL3セクションが見つからない場合にNoneが返ること"""
+        mock_fetch.return_value = "<html><body><div>No GOAL3</div></body></html>"
+
+        cache_dir = tmp_path / "votes_no_goal3"
+        cache_dir.mkdir()
+        scraper = VoteScraper(cache_dir=str(cache_dir))
+        result = scraper.fetch_schedule(1610)
+
+        assert result is None
+
+    @patch.object(VoteScraper, "_retry_fetch")
+    def test_fetch_schedule_saves_cache(self, mock_fetch, tmp_path):
+        """スケジュール取得後にキャッシュが保存されること"""
+        html = """
+        <html><body>
+            <div class="goal3-prediction">
+                <table>
+                    <tr class="team-row">
+                        <td class="team-name">Team A</td>
+                        <td class="vote-rate">25%</td>
+                        <td class="vote-rate">30%</td>
+                        <td class="vote-rate">25%</td>
+                        <td class="vote-rate">20%</td>
+                    </tr>
+                    <tr class="team-row">
+                        <td class="team-name">Team B</td>
+                        <td class="vote-rate">25%</td>
+                        <td class="vote-rate">30%</td>
+                        <td class="vote-rate">25%</td>
+                        <td class="vote-rate">20%</td>
+                    </tr>
+                </table>
+            </div>
+        </body></html>
+        """
+        mock_fetch.return_value = html
+
+        scraper = VoteScraper(cache_dir=str(tmp_path))
+        scraper.fetch_schedule(1608)
+
+        cache_path = tmp_path.parent / "schedules" / "round_1608.json"
+        assert cache_path.exists()

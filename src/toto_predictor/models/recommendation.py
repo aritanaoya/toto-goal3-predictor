@@ -47,6 +47,9 @@ class Recommendation:
     action: ActionType
     kelly_fraction: float = 0.0
     confidence: ConfidenceLevel = "medium"
+    ev: float = 0.0
+    contrarian_score: float = 0.0
+    is_best_ev_for_team: bool = False
     id: str = field(default_factory=lambda: str(uuid4()))
     created_at: datetime = field(default_factory=datetime.now)
 
@@ -75,6 +78,9 @@ class Recommendation:
             action=data["action"],
             kelly_fraction=data.get("kelly_fraction", 0.0),
             confidence=data.get("confidence", "medium"),
+            ev=data.get("ev", 0.0),
+            contrarian_score=data.get("contrarian_score", 0.0),
+            is_best_ev_for_team=data.get("is_best_ev_for_team", False),
             created_at=created_at or datetime.now(),
         )
 
@@ -95,6 +101,9 @@ class Recommendation:
             "action": self.action,
             "kelly_fraction": self.kelly_fraction,
             "confidence": self.confidence,
+            "ev": self.ev,
+            "contrarian_score": self.contrarian_score,
+            "is_best_ev_for_team": self.is_best_ev_for_team,
             "created_at": self.created_at.isoformat(),
         }
 

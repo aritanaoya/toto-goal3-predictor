@@ -1,6 +1,6 @@
 {
   "feature_names": [
-    "window_size",
+    "is_home",
     "goals_mean",
     "goals_std",
     "xg_mean",
@@ -14,21 +14,21 @@
     "possession_mean",
     "passes_mean",
     "pass_accuracy",
-    "conceded_mean",
-    "conceded_std",
-    "xg_against_mean",
-    "ppda_mean",
-    "interceptions_mean",
-    "home_goals_mean",
-    "away_goals_mean",
-    "fouls_mean",
-    "yellow_cards_mean",
-    "corners_mean",
-    "is_home"
+    "opp_conceded_mean",
+    "opp_conceded_std",
+    "opp_xg_against_mean",
+    "opp_ppda_mean",
+    "opp_interceptions_mean",
+    "opp_possession_mean",
+    "attack_vs_defense",
+    "xg_diff",
+    "possession_diff",
+    "shot_conversion_vs_opp_defense",
+    "adjusted_goals_mean"
   ],
   "weights": {
     "poisson": 0.3,
     "xgboost": 0.7
   },
-  "saved_at": "2026-02-06T13:59:33.490487"
+  "saved_at": "2026-02-09T14:20:51.429492"
 }
