@@ -205,3 +205,28 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+# Claude
+.claude
+
+# Project-specific
+# Data files (large, downloaded externally)
+data/wyscout/**/*.xlsx
+data/processed/*.db
+data/predictions/*.json
+data/votes/*.json
+
+# Trained models (large binary files)
+models/*.joblib
+
+# Generated reports (can be regenerated)
+reports/*.md
+!reports/.gitkeep
+
+# Logs
+logs/*.log
+!logs/.gitkeep
+
+# OS files
+.DS_Store
